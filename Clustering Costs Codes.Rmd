@@ -1,0 +1,235 @@
+library(dplyr)
+library(sqldf)
+library(reshape2)
+
+# Read data
+VTREVCODE16 <- read.csv("~/Desktop/healthcare/03/VTREVCODE16.TXT")
+VTINP16_upd <- read.csv("~/Desktop/healthcare/03/VTINP16_upd.TXT")
+`FILE_LAYOUT_and_CODES_MSDRG2007+_20.977` <- read.csv("~/Desktop/healthcare/03/FILE_LAYOUT_and_CODES_MSDRG2007+_20-977.csv", sep=";")
+REVCODE_FILE_LAYOUT_and_CODES_PCCR <- read.csv("~/Desktop/healthcare/03/REVCODE_FILE_LAYOUT_and_CODES_PCCR.csv", sep=";")
+
+# Filter DRGs between 20 and 977
+VTREVCODE16_new<-VTREVCODE16%>%select(Uniq,REVCODE,REVCHRGS,PCCR)
+DRG0 = subset(VTINP16_upd, VTINP16_upd$DRG >=20&VTINP16_upd$DRG <=977,select=names(VTINP16_upd))
+
+# Merge filtered DRG to the Revenue Code file on UNIQ 
+dt1<-merge(VTREVCODE16_new,DRG0, by.x = "Uniq", by.y = "UNIQ")
+dt1_new<-dt1%>% select(Uniq,PCCR,REVCHRGS,DRG)
+
+# Exclude the low dollar value services (less than $100)
+dt2 = subset(dt1_new, dt1_new$REVCHRGS >=100,select=names(dt1_new))
+
+# Sum all charges group by DRG, PCCR categories
+PCCR_groupby <- dt2 %>% group_by(Uniq, DRG, PCCR) %>% summarise(revchrgs = sum(REVCHRGS))
+PCCR <- merge(PCCR_groupby, REVCODE_FILE_LAYOUT_and_CODES_PCCR, by = "PCCR")
+DRG<-merge(PCCR, `FILE_LAYOUT_and_CODES_MSDRG2007+_20.977`, by.x = "DRG", by.y = "MSDRG")
+dt3<-DRG%>% select(MSDRG_DESC,PCCR.NAME,revchrgs)
+
+# Tabulate
+tablulate <- dcast(dt3,MSDRG_DESC~PCCR.NAME,mean)
+
+# Combining the PCCR 3700 Operating Room & PCCR 4000 Anesthesiology
+tablulate$PCCR_OR_and_Anesth_Costs <- tablulate$`3700-Operating Room` + tablulate$`4000-Anesthesiology`
+
+rownames(tablulate) <- tablulate[,1]
+tablulate <- tablulate[,-1]
+
+# Turn NA to 0
+tablulate[is.na(tablulate)] = 0
+View(tablulate) #687 rows and 55 columns
+
+setwd("/Users/tmh/desktop") 
+write.csv(tablulate,"PCCR_DRG.csv")
+
+Cluster 3 analysis:
+code=read.csv("FILE_LAYOUT_and_CODES.csv")
+mdc<-read.csv("DRG_MDC_cluster_V2.csv")
+colnames(code)[1]<-"MSDRG"
+total=merge(mdc,code,by="MSDRG")
+new=total%>%filter(cluster==3)%>%select(MSDRG,MSDRG_DESC,MSDRG_M_S,X3700.4000.PCCR_OR_and_Anesth_Costs,MDC_CAT_NAME)
+new%>%filter(MSDRG_M_S=="M")%>%count()
+new%>%filter(MSDRG_M_S=="S")%>%count()
+new%>%filter( MSDRG_M_S=="S")%>%summarise(mean=mean(X3700.4000.PCCR_OR_and_Anesth_Costs))
+for (i in c(1:195)){
+  if(new$MSDRG_M_S[i]=="S "){
+    new$MSDRG_M_S[i]="S"
+  }
+}
+mean(new$X3700.4000.PCCR_OR_and_Anesth_Costs)
+
+new$MSDRG_M_S<-as.character(new$MSDRG_M_S)
+new$MSDRG_DESC <- factor(new$MSDRG_DESC, 
+                               levels = new$MSDRG_DESC[order(new$X3700.4000.PCCR_OR_and_Anesth_Costs)])
+new%>%ggplot(aes(x=MSDRG_DESC,y=X3700.4000.PCCR_OR_and_Anesth_Costs))+geom_point(aes(color=MSDRG_M_S))+
+  theme(panel.background = element_blank())
+
+Q3 Cluster Exploration and Validation
+
+ setwd("E:/MBA@Brandeis/Syllabus/193HS-256F Healthcare Data Analytics and Data Mining/Final")
+getwd()
+
+library(dplyr)  # data manipulation
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering algorithms & visualization
+library(fpc)
+library(amap)
+library(clusterSim)
+library(ggplot2)
+library(plotly)
+
+drg_pccr <- read.csv("PCCR_DRG_DX.csv",header = T,fileEncoding = 'UTF-8-BOM')
+summary(drg_pccr)
+mdc <- read.csv("DRG_MDC.csv", header = T)
+#Normalize
+nmp <- drg_pccr$X3700.4000.PCCR_OR_and_Anesth_Costs
+nmp_m <- mean(nmp)
+nmp_sd <- sd(nmp)
+
+drg_z <- scale(nmp, center = nmp_m, scale = nmp_sd)
+drg_z
+
+#Calculate distance
+dist_eu <- get_dist(drg_z, method = "euclidean")
+fviz_dist(dist_eu, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+
+# Scree plot
+wss <- (nrow(drg_z) -1) * sum(apply(drg_z, 2, var))
+# var
+for (i in 2:10) wss[i] <- sum(kmeans(drg_z, centers = i)$withinss)
+plot(1:10,wss,
+     type ='b',
+     xlab = "Number of Clusters",
+     ylab = "within Cluster Sum of Squares")
+
+# Choosing K ....
+set.seed(200)
+k <- list()
+for (i in 1:10){
+  k[[i]] <- kmeans(drg_z, i,nstart =15)
+}
+
+between_totss <- list()
+for (i in 1:10) {
+  between_totss[[i]] <- k[[i]]$betweenss/k[[i]]$totss
+} 
+
+plot(1:10,
+     between_totss,
+     type = 'b',
+     ylab = "Between ss/ Total SS",
+     xlab = "Cluster #")
+
+plot(drg_z, col = k[[2]]$cluster)
+# K-means clustering
+## k=2
+#fviz_cluster(k[[2]], data = drg_z)
+between_totss
+index.G1(drg_z,k[[2]]$cluster,d=NULL,centrotypes="centroids")
+
+f_stat <- list()
+for (i in 2:5) {
+  f_stat[i] <-  round(calinhara(drg_z,k[[i]]$cluster),digits=2) ## f-stat
+}
+
+f_stat_cluster <- cbind(cluster = 2:5, f_value = f_stat[2:5])
+f_stat_cluster <- as.data.frame(f_stat_cluster)
+f_stat_cluster$cluster <- as.character(f_stat_cluster$cluster)
+
+f_stat_cluster %>% ggplot(aes(x= cluster, y = f_value)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label = f_value))
+
+## k=3
+col_pl <- c('green','blue','red')
+plot(drg_z, col = k[[3]]$cluster)
+legend("right",
+       legend = levels(as.factor(k[[3]]$cluster)),
+       fill = col_pl)
+
+drg.cluster <- cbind(drg_pccr[,c(1:2,57)],cluster = k[[3]]$cluster)
+
+drg.cluster <- cbind(drg.cluster,Operating.Room=drg_pccr$X3700.Operating.Room,
+                     Anesthesiology= drg_pccr$X4000.Anesthesiology)
+drg.cluster$DRG_Desc <- factor(drg.cluster$DRG_Desc, 
+                     levels = drg.cluster$DRG_Desc[order(drg.cluster$X3700.4000.PCCR_OR_and_Anesth_Costs)])
+drg.cluster$cluster <- as.character(drg.cluster$cluster)
+q <- drg.cluster %>% ggplot(aes(x= DRG_Desc, y =X3700.4000.PCCR_OR_and_Anesth_Costs)) +
+  geom_point(mapping = aes(shape = cluster,col = cluster)) +
+  scale_y_continuous(name = 'PCCR OR and Anesth Costs', breaks = seq(0,65000,10000)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.title.x = element_text("MSDRG_DESC")) 
+ggplotly(q)
+
+Anesth <- drg.cluster %>% ggplot(aes(x= DRG_Desc )) +
+  geom_point(mapping = aes(y =Anesthesiology,shape = cluster,col = cluster)) +
+  geom_point(aes(y=Operating.Room, shape = cluster,col = cluster))+
+  scale_y_continuous(name = 'Separate OR and Anesth Costs', breaks = seq(0,65000,10000)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.title.x = element_text("MSDRG_DESC")) 
+ggplotly(Anesth)
+
+drg_mdc.cluster <- merge(drg.cluster,mdc, by.x = "MSDRG", by.y = "DRG" )
+
+DRG_mdc_k <- drg_mdc.cluster %>% group_by(cluster, MDC,MDC_CAT_NAME) %>% summarise(n = n())
+drg_mdc.cluster %>% group_by(cluster, MDC,MDC_CAT_NAME) %>% summarise(n = n()) %>% 
+  ggplot(aes(x = MDC_CAT_NAME, y = n, fill = cluster)) +
+  geom_bar(stat = "identity", ) +
+  theme(legend.position="right",
+        axis.text.x = element_text(angle = 90, hjust = 1))
+
+## summary of cluster
+smry_cluster <- drg_mdc.cluster %>% group_by(cluster) %>% summarise(DRG_size =n(),
+                                                    max_cost = max(X3700.4000.PCCR_OR_and_Anesth_Costs),
+                                                    min_cost = min(X3700.4000.PCCR_OR_and_Anesth_Costs)) %>% 
+  arrange(max_cost)
+
+# SOM
+library(kohonen)
+set.seed(222)
+
+drg_g <- somgrid(xdim = 4, ydim = 4, topo = "rectangular")
+map <- som(drg_z,
+           grid = drg_g,
+           alpha = c(0.05,0.01),
+           radius = 1)
+plot(map,
+     type = 'codes',
+     palette.name = rainbow,
+     main = "4 by 4  Mapping of DRG")
+
+#### option 2
+set.seed(100)
+#kmeans
+clust <- kmeans(map$codes[[1]], 3)
+
+round(calinhara(drg_z,clust$cluster[map$unit.classif]),digits=2) 
+plot(map, type = "codes",
+     palette.name = rainbow,
+     bgcol = col_pl[clust$cluster], 
+     main = "SOM Cluster Map"
+)
+add.cluster.boundaries(map, clust$cluster)
+legend("right",
+       legend = levels(as.factor(clust$cluster)),
+       fill = col_pl)
+drg_som <-data.frame(drg_pccr[,c(1:2,57)], cluster = clust$cluster[map$unit.classif])
+
+drg_som$DRG_Desc <- factor(drg_som$DRG_Desc, 
+                               levels = drg_som$DRG_Desc[order(drg_som$X3700.4000.PCCR_OR_and_Anesth_Costs)])
+drg_som$cluster <- as.character(drg_som$cluster)
+p <- drg_som %>% ggplot(aes(x= DRG_Desc, y =X3700.4000.PCCR_OR_and_Anesth_Costs)) +
+  geom_point(aes(shape = cluster,color = cluster))+
+  scale_y_continuous(name = 'PCCR_OR_and_Anesth_Costs', breaks = seq(0,65000,10000)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.title.x = element_text("MSDRG_DESC"),
+        legend.position = "left") 
+
+ggplotly(p)
+sil <- silhouette(k[[3]]$cluster, dist(drg_z))
+fviz_silhouette(sil)
+
+sil2 <- silhouette(clust$cluster[map$unit.classif], dist(drg_z))
+fviz_silhouette(sil2)
